@@ -35,8 +35,6 @@ from isaaclab_assets.robots.humanoid import HUMANOID_CFG  # isort:skip
 @configclass
 class HandWaversSceneCfg(InteractiveSceneCfg):
     """Configuration for a cart-pole scene."""
-
-
     # terrain
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
@@ -46,25 +44,8 @@ class HandWaversSceneCfg(InteractiveSceneCfg):
         debug_vis=False,
     )
 
-    # robot - with custom initial pose
-    robot = HUMANOID_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.05),  # Base height
-            rot=(1.0, 0.0, 0.0, 0.0),  # Upright orientation
-            joint_pos={
-                # Standing pose joint angles (example values - adjust for your robot)
-                ".*_waist.*": 0.0,
-                ".*_upper_arm.*": 0.0,
-                ".*_lower_arm": 0.0,
-                ".*_thigh:0": 0.0,      # Hip abduction/adduction
-                ".*_thigh:1": 0.0,     # Hip flexion (slightly bent)
-                ".*_thigh:2": 0.0,      # Hip rotation
-                ".*_shin": 0.0,         # Knee extension
-                ".*_foot.*": 0.0,      # Ankle angle
-            },
-        )
-    )
+    # robot
+    robot = HUMANOID_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
     # lights
     light = AssetBaseCfg(
@@ -144,8 +125,8 @@ class EventCfg:
         func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
-            "position_range": (0.0, 0.0),  # No randomization
-            "velocity_range": (0.0, 0.0),
+            "position_range": (-0.2, 0.2),
+            "velocity_range": (-0.1, 0.1),
         },
     )
 
@@ -156,15 +137,32 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # (1) Reward for moving forward
-    progress = RewTerm(func=mdp.progress_reward, weight=1.0, params={"target_pos": (1000.0, 0.0, 0.0)})
+    # (1) Reward for liffting hand 
+    hand_lift = RewTerm(
+        func=mdp.hand_lifting_reward,
+        weight=0.5,  # Main reward component
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "hand_name": "right_hand"
+        }
+    )
+
     # (2) Stay alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=2.0)
     # (3) Reward for non-upright posture
-    upright = RewTerm(func=mdp.upright_posture_bonus, weight=0.1, params={"threshold": 0.93})
+    upright = RewTerm(func=mdp.upright_posture_bonus, weight=0.5, params={"threshold": 0.93})
     # (4) Reward for moving in the right direction
-    move_to_target = RewTerm(
-        func=mdp.move_to_target_bonus, weight=0.5, params={"threshold": 0.8, "target_pos": (1000.0, 0.0, 0.0)}
+    # move_to_target = RewTerm(
+    # func=mdp.move_to_target_bonus, weight=0.5, params={"threshold": 0.8, "target_pos": (1000.0, 0.0, 0.0)}
+    # )
+    # Primary lift reward (this is what you asked for)
+    hand_waving = RewTerm(
+        func=mdp.hand_waving_reward,
+        weight=1.0,  # Secondary to lifting
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "hand_name": "right_hand"
+        }
     )
     # (5) Penalty for large action commands
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.01)
@@ -229,7 +227,7 @@ class HandWaversEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the MuJoCo-style Humanoid walking environment."""
 
     # Scene settings
-    scene: HandWaversSceneCfg = HandWaversSceneCfg(num_envs=4, env_spacing=4.0)
+    scene: HandWaversSceneCfg = HandWaversSceneCfg(num_envs=1000, env_spacing=4.0)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
