@@ -12,6 +12,7 @@ import isaaclab.utils.math as math_utils
 import isaaclab.utils.string as string_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
+from isaaclab.sensors import ContactSensor
 
 from . import observations as obs
 
@@ -37,153 +38,128 @@ def move_to_target_bonus(
     heading_proj = obs.base_heading_proj(env, target_pos, asset_cfg).squeeze(-1)
     return torch.where(heading_proj > threshold, 1.0, heading_proj / threshold)
 
-class hand_lifting_reward(ManagerTermBase):
-    """Reward for lifting hand to target height with smooth upward motion.
+
+def feet_on_ground_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_foot", "right_foot"])
+) -> torch.Tensor:
+    """Reward for keeping both feet in contact with the ground."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    
+    # Get foot body indices
+    foot_indices = [asset.body_names.index(name) for name in asset_cfg.body_names]
+    
+    # Check if feet have contact forces (using net forces on feet)
+    foot_forces = asset.data.body_net_forces_w[:, foot_indices, 2]  # Z-axis forces
+    
+    # Both feet should have upward forces (supporting weight)
+    feet_in_contact = (foot_forces > 5.0).float()  # Threshold: 5N minimum contact force
+    
+    # Return reward: 1.0 if both feet touching, 0.5 if one foot, 0.0 if airborne
+    return feet_in_contact.mean(dim=1)
+
+
+def base_height_stability(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalty for deviating from target standing height (prevents jumping)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    current_height = asset.data.root_pos_w[:, 2]
+    
+    # Squared error from target height
+    height_error = torch.square(current_height - target_height)
+    
+    return height_error
+
+
+class hand_waving_reward(ManagerTermBase):
+    """Reward for hand waving motion while maintaining balance.
     
     Rewards:
-    - Height achievement (reaches target lift_height)
-    - Upward velocity (bonus for lifting motion)
-    - Smooth trajectory (penalizes jerky movements)
+    - Hand reaches target height (shoulder level)
+    - Rhythmic side-to-side motion (waving)
+    - Smooth oscillation without jerky movements
     """
     
     def __init__(self, env: ManagerBasedRLEnv, cfg: RewardTermCfg):
         super().__init__(cfg, env)
         
-        # Parameters from config
-        self.lift_height = cfg.params.get("lift_height", 1.5)  # Target height in meters
-        self.min_lift_height = cfg.params.get("min_lift_height", 1.0)  # Minimum acceptable height
-        self.max_lift_vel = cfg.params.get("max_lift_vel", 2.0)  # Max desired lift speed
+        # Parameters
+        self.target_height = cfg.params.get("target_height", 1.3)  # Shoulder height
+        self.wave_amplitude = cfg.params.get("wave_amplitude", 0.25)  # Side motion range
+        self.wave_frequency = cfg.params.get("wave_frequency", 2.0)  # Target Hz
         
-        # Track previous height for velocity calculation
-        self.prev_height = torch.zeros(env.num_envs, device=env.device)
-        
-    def reset(self, env_ids: torch.Tensor):
-        """Reset height tracking for new episodes."""
-        self.prev_height[env_ids] = 0.0
-        
-    def __call__(
-        self,
-        env: ManagerBasedRLEnv,
-        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-        hand_name: str = "right_hand",
-    ) -> torch.Tensor:
-        # Get hand position
-        asset: Articulation = env.scene[asset_cfg.name]
-        hand_idx = asset.body_names.index(hand_name)
-        hand_pos = asset.data.body_pos_w[:, hand_idx, :3]
-        current_height = hand_pos[:, 2]
-        
-        # --- Lift Reward Components ---
-        reward = torch.zeros(env.num_envs, device=env.device)
-        
-        # 1. Height achievement reward (dominant component)
-        # Ranges from 0 (at min_lift_height) to 1.0 (at lift_height)
-        height_progress = (current_height - self.min_lift_height) / (self.lift_height - self.min_lift_height)
-        height_progress = torch.clamp(height_progress, 0.0, 1.0)
-        
-        # Use a shaped reward: small reward for getting off ground, big reward for reaching target
-        lift_reward = torch.where(
-            current_height >= self.lift_height,
-            1.0,  # Full reward at target height
-            height_progress * 0.3  # Partial reward for partial lifting
-        )
-        reward += lift_reward * 0.5  # Weight this component
-        
-        # 2. Upward velocity bonus (encourages active lifting, not just holding)
-        upward_vel = (current_height - self.prev_height) / env.step_dt
-        self.prev_height[:] = current_height
-        
-        # Only reward positive (upward) velocity, capped at max_lift_vel
-        upward_bonus = torch.clamp(upward_vel / self.max_lift_vel, 0.0, 1.0)
-        reward += upward_bonus * 0.2  # Smaller weight than height reward
-        
-        # 3. Height maintenance bonus (once at target, keep it there)
-        at_target = current_height >= self.lift_height
-        maintenance_bonus = torch.where(
-            at_target,
-            0.1,  # Small continuous reward for maintaining height
-            0.0
-        )
-        reward += maintenance_bonus
-        
-        return reward
-
-
-class hand_waving_reward(ManagerTermBase):
-    """Reward for lifting hand and performing waving motion.
-    Rewards:
-    - Vertical hand position (lifting)
-    - Rhythmic oscillation (waving frequency)
-    - Smooth motion (penalizes jerky movements)
-    """
-    def __init__(self, env: ManagerBasedRLEnv, cfg: RewardTermCfg):
-        super().__init__(cfg, env)   
-        # Buffers for tracking hand motion
-        self.hand_pos_history = torch.zeros(env.num_envs, 3, 10, device=env.device)  # Last 10 positions
-        self.hand_vel_history = torch.zeros(env.num_envs, 3, 10, device=env.device)  # Last 10 velocities
+        # History tracking
         self.prev_hand_pos = torch.zeros(env.num_envs, 3, device=env.device)
-
-        # Wave parameters
-        self.target_wave_freq = cfg.params.get("target_frequency", 2.0)  # 2 Hz waving
-        self.target_wave_amp = cfg.params.get("target_amplitude", 0.3)   # 30cm amplitude
-        self.lift_height = cfg.params.get("lift_height", 1.5)            # Target lift height
-
+        self.hand_x_history = torch.zeros(env.num_envs, 20, device=env.device)  # Last 20 timesteps
+        self.history_idx = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        self.direction_changes = torch.zeros(env.num_envs, device=env.device)
+        self.prev_x_vel = torch.zeros(env.num_envs, device=env.device)
+        
     def reset(self, env_ids: torch.Tensor):
-        """Reset history buffers for new episodes."""
-        self.hand_pos_history[env_ids] = 0
-        self.hand_vel_history[env_ids] = 0
-        self.prev_hand_pos[env_ids] = 0
-    
+        """Reset tracking for new episodes."""
+        self.prev_hand_pos[env_ids] = 0.0
+        self.hand_x_history[env_ids] = 0.0
+        self.history_idx[env_ids] = 0
+        self.direction_changes[env_ids] = 0.0
+        self.prev_x_vel[env_ids] = 0.0
+        
     def __call__(
         self,
         env: ManagerBasedRLEnv,
         asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
         hand_name: str = "right_hand",
+        target_height: float = 1.3,
+        wave_amplitude: float = 0.25,
     ) -> torch.Tensor:
-        # Get hand position
+        # Get hand position in world frame
         asset: Articulation = env.scene[asset_cfg.name]
         hand_idx = asset.body_names.index(hand_name)
-        hand_pos = asset.data.body_pos_w[:, hand_idx, :3]
+        hand_pos = asset.data.body_pos_w[:, hand_idx, :]
         
-        # Store in history
-        self.hand_pos_history = torch.roll(self.hand_pos_history, 1, dims=2)
-        self.hand_pos_history[:, :, 0] = hand_pos
-        
-        # Compute velocity
-        hand_vel = (hand_pos - self.prev_hand_pos) / env.step_dt
-        self.prev_hand_pos[:] = hand_pos
-        
-        self.hand_vel_history = torch.roll(self.hand_vel_history, 1, dims=2)
-        self.hand_vel_history[:, :, 0] = hand_vel
-        
-        # --- Reward components ---
         reward = torch.zeros(env.num_envs, device=env.device)
         
-        # 1. Lift reward: encourage hand to reach target height
-        lift_error = torch.abs(hand_pos[:, 2] - self.lift_height)
-        lift_reward = torch.exp(-lift_error / 0.2)  # Gaussian-like reward
-        reward += lift_reward * 0.5
+        # --- Component 1: Height Reward ---
+        # Encourage hand to be at shoulder height
+        height_error = torch.abs(hand_pos[:, 2] - target_height)
+        height_reward = torch.exp(-3.0 * height_error)  # Gaussian reward, tight tolerance
+        reward += height_reward * 0.4
         
-        # 2. Wave reward: encourage oscillating motion
-        if env.episode_length_buf[0] > 20:  # Need enough history
-            # Extract horizontal motion (x-axis)
-            x_motion = self.hand_pos_history[:, 0, :20]
-            
-            # Compute oscillation frequency using FFT
-            fft = torch.fft.rfft(x_motion, dim=1)
-            freq_magnitudes = torch.abs(fft)
-            
-            # Find peak frequency
-            freqs = torch.fft.rfftfreq(20, d=env.step_dt, device=env.device)
-            target_freq_idx = torch.argmin(torch.abs(freqs - self.target_wave_freq))
-            wave_reward = freq_magnitudes[:, target_freq_idx] / (torch.sum(freq_magnitudes, dim=1) + 1e-6)
-            reward += wave_reward * 0.3
-            
-        # 3. Smoothness penalty: penalize high accelerations
-        if env.episode_length_buf[0] > 2:
-            acceleration = (self.hand_vel_history[:, :, 0] - self.hand_vel_history[:, :, 1]) / env.step_dt
-            accel_penalty = torch.norm(acceleration, dim=1)
-            reward -= accel_penalty * 0.05
+        # --- Component 2: Waving Motion Reward ---
+        # Get hand velocity
+        hand_vel = (hand_pos - self.prev_hand_pos) / env.step_dt
+        x_vel = hand_vel[:, 0]  # Side-to-side velocity
+        
+        # Detect direction changes (waving back and forth)
+        sign_change = (x_vel * self.prev_x_vel) < 0
+        self.direction_changes += sign_change.float()
+        
+        # Reward oscillation: check if hand is moving side-to-side
+        oscillation_reward = torch.abs(x_vel).clamp(0, 1.0)  # Reward velocity magnitude
+        reward += oscillation_reward * 0.3
+        
+        # Bonus for completing wave cycles (direction changes)
+        if env.common_step_counter > 0 and env.common_step_counter % 50 == 0:  # Check every ~1 second
+            wave_cycles = self.direction_changes / 50.0  # Normalize by timesteps
+            cycle_bonus = (wave_cycles * 2.0).clamp(0, 1.0)  # Target ~2Hz
+            reward += cycle_bonus * 0.2
+            self.direction_changes[:] = 0  # Reset counter
+        
+        # --- Component 3: Amplitude Reward ---
+        # Track horizontal position range
+        self.hand_x_history[torch.arange(env.num_envs, device=env.device), self.history_idx] = hand_pos[:, 0]
+        self.history_idx = (self.history_idx + 1) % 20
+        
+        # Calculate range of motion
+        x_range = self.hand_x_history.max(dim=1)[0] - self.hand_x_history.min(dim=1)[0]
+        amplitude_reward = torch.exp(-torch.abs(x_range - wave_amplitude) / 0.1)
+        reward += amplitude_reward * 0.1
+        
+        # Update tracking
+        self.prev_hand_pos[:] = hand_pos
+        self.prev_x_vel[:] = x_vel
         
         return reward
 

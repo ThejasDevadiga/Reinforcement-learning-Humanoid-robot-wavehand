@@ -92,9 +92,7 @@ class ObservationsCfg:
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
         base_yaw_roll = ObsTerm(func=mdp.base_yaw_roll)
-        base_angle_to_target = ObsTerm(func=mdp.base_angle_to_target, params={"target_pos": (1000.0, 0.0, 0.0)})
         base_up_proj = ObsTerm(func=mdp.base_up_proj)
-        base_heading_proj = ObsTerm(func=mdp.base_heading_proj, params={"target_pos": (1000.0, 0.0, 0.0)})
         joint_pos_norm = ObsTerm(func=mdp.joint_pos_limit_normalized)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1)
         feet_body_forces = ObsTerm(
@@ -102,8 +100,16 @@ class ObservationsCfg:
             scale=0.01,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=["left_foot", "right_foot"])},
         )
+        # Add hand position observation
+        hand_pos = ObsTerm(
+            func=mdp.body_pos_in_robot_root_frame,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["right_hand"])}
+        )
         actions = ObsTerm(func=mdp.last_action)
-
+        hand_pos = ObsTerm(
+            func=mdp.body_pos_in_robot_root_frame,
+            params={"asset_cfg": SceneEntityCfg("robot", body_names=["right_hand"])}
+        )
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = True
@@ -137,36 +143,57 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
-    # (1) Reward for liffting hand 
-    hand_lift = RewTerm(
-        func=mdp.hand_lifting_reward,
-        weight=0.5,  # Main reward component
+    # (1) Primary: Hand waving motion
+    hand_waving = RewTerm(
+        func=mdp.hand_waving_reward,
+        weight=2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "hand_name": "right_hand"
+            "hand_name": "right_hand",
+            "target_height": 1.3,  # Reasonable shoulder height
+            "wave_amplitude": 0.25,  # 25cm side-to-side motion
         }
     )
 
     # (2) Stay alive bonus
-    alive = RewTerm(func=mdp.is_alive, weight=2.0)
-    # (3) Reward for non-upright posture
-    upright = RewTerm(func=mdp.upright_posture_bonus, weight=0.5, params={"threshold": 0.93})
-    # (4) Reward for moving in the right direction
-    # move_to_target = RewTerm(
-    # func=mdp.move_to_target_bonus, weight=0.5, params={"threshold": 0.8, "target_pos": (1000.0, 0.0, 0.0)}
-    # )
-    # Primary lift reward (this is what you asked for)
-    hand_waving = RewTerm(
-        func=mdp.hand_waving_reward,
-        weight=1.0,  # Secondary to lifting
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "hand_name": "right_hand"
-        }
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    
+    # (3) Reward for maintaining upright posture
+    upright = RewTerm(func=mdp.upright_posture_bonus, weight=1.5, params={"threshold": 0.93})
+    
+    # (4) CRITICAL: Keep feet on ground
+    feet_contact = RewTerm(
+        func=mdp.feet_on_ground_reward,
+        weight=2.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["left_foot", "right_foot"])}
     )
-    # (5) Penalty for large action commands
+    
+    # (5) Penalize base height changes (prevent jumping)
+    base_height_penalty = RewTerm(
+        func=mdp.base_height_stability,
+        weight=-2.0,
+        params={"target_height": 1.1}  # Typical humanoid standing height
+    )
+    
+    # (6) Penalize excessive base velocity (no jumping/moving around)
+    base_lin_vel_penalty = RewTerm(
+        func=mdp.lin_vel_z_l2,
+        weight=-1.0
+    )
+    
+    # (7) Penalize body rotation instability
+    body_orientation_penalty = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=-0.5
+    )
+    
+    # (8) Penalty for large action commands
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.01)
-    # (6) Penalty for energy consumption
+    
+    # (9) Penalty for action rate (smoothness)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    
+    # (10) Penalty for energy consumption
     energy = RewTerm(
         func=mdp.power_consumption,
         weight=-0.005,
@@ -184,7 +211,8 @@ class RewardsCfg:
             }
         },
     )
-    # (7) Penalty for reaching close to joint limits
+    
+    # (11) Penalty for reaching close to joint limits
     joint_pos_limits = RewTerm(
         func=mdp.joint_pos_limits_penalty_ratio,
         weight=-0.25,
@@ -224,7 +252,7 @@ class TerminationsCfg:
 
 @configclass
 class HandWaversEnvCfg(ManagerBasedRLEnvCfg):
-    """Configuration for the MuJoCo-style Humanoid walking environment."""
+    """Configuration for the MuJoCo-style Humanoid waving environment."""
 
     # Scene settings
     scene: HandWaversSceneCfg = HandWaversSceneCfg(num_envs=1000, env_spacing=4.0)

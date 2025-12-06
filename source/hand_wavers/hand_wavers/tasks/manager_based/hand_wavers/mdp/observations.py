@@ -73,3 +73,42 @@ def base_angle_to_target(
     angle_to_target = torch.atan2(torch.sin(angle_to_target), torch.cos(angle_to_target))
 
     return angle_to_target.unsqueeze(-1)
+
+
+def body_pos_in_robot_root_frame(
+    env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Position of specified bodies relative to the robot's root frame.
+    
+    This is useful for tracking hand position relative to the body center,
+    which helps the policy learn coordinated waving motions.
+    """
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    
+    # Get body indices for the specified bodies
+    body_indices = [asset.body_names.index(name) for name in asset_cfg.body_names]
+    
+    # Get body positions in world frame
+    body_pos_w = asset.data.body_pos_w[:, body_indices, :]
+    
+    # Get root position and orientation
+    root_pos_w = asset.data.root_pos_w
+    root_quat_w = asset.data.root_quat_w
+    
+    # Transform body positions to root frame
+    # First, translate to root frame
+    body_pos_rel = body_pos_w - root_pos_w.unsqueeze(1)
+    
+    # Then, rotate to root frame (inverse rotation)
+    root_quat_inv = math_utils.quat_inv(root_quat_w)
+    
+    # Apply rotation to each body position
+    num_bodies = len(body_indices)
+    body_pos_root_frame = torch.zeros_like(body_pos_rel)
+    
+    for i in range(num_bodies):
+        body_pos_root_frame[:, i, :] = math_utils.quat_apply(root_quat_inv, body_pos_rel[:, i, :])
+    
+    # Reshape to (num_envs, num_bodies * 3)
+    return body_pos_root_frame.view(env.num_envs, -1)
