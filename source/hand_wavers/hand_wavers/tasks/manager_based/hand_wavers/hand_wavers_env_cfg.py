@@ -150,13 +150,13 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "hand_name": "right_hand",
-            "target_height": 1.3,  # Reasonable shoulder height
+            "target_height": 1.4,  # Reasonable shoulder height
             "wave_amplitude": 0.25,  # 25cm side-to-side motion
         }
     )
 
     # (2) Stay alive bonus
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    alive = RewTerm(func=mdp.is_alive, weight=1.5)
     
     # (3) Reward for maintaining upright posture
     upright = RewTerm(func=mdp.upright_posture_bonus, weight=1.5, params={"threshold": 0.93})
@@ -164,7 +164,7 @@ class RewardsCfg:
     # (4) CRITICAL: Keep feet on ground
     feet_contact = RewTerm(
         func=mdp.feet_on_ground_reward,
-        weight=2.0,
+        weight=0.5,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=["left_foot", "right_foot"])}
     )
     
