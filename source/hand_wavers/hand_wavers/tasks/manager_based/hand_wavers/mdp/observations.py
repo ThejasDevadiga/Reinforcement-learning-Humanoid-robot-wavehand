@@ -103,6 +103,7 @@ def body_pos_in_robot_root_frame(
     # Then, rotate to root frame (inverse rotation)
     root_quat_inv = math_utils.quat_inv(root_quat_w)
     
+
     # Apply rotation to each body position
     num_bodies = len(body_indices)
     body_pos_root_frame = torch.zeros_like(body_pos_rel)
@@ -112,3 +113,4 @@ def body_pos_in_robot_root_frame(
     
     # Reshape to (num_envs, num_bodies * 3)
     return body_pos_root_frame.view(env.num_envs, -1)
+    # ==================================================
