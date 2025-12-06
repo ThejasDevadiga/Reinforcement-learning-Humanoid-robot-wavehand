@@ -43,19 +43,33 @@ def feet_on_ground_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_foot", "right_foot"])
 ) -> torch.Tensor:
-    """Reward for keeping both feet in contact with the ground."""
+    """Reward for keeping both feet in contact with the ground.
+    
+    Uses foot height and velocity as proxies for ground contact.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     
     # Get foot body indices
     foot_indices = [asset.body_names.index(name) for name in asset_cfg.body_names]
     
-    # Check if feet have contact forces (using net forces on feet)
-    foot_forces = asset.data.body_net_forces_w[:, foot_indices, 2]  # Z-axis forces
+    # Get foot positions in world frame
+    foot_positions = asset.data.body_pos_w[:, foot_indices, :]
+    foot_heights = foot_positions[:, :, 2]  # Z-coordinate
     
-    # Both feet should have upward forces (supporting weight)
-    feet_in_contact = (foot_forces > 5.0).float()  # Threshold: 5N minimum contact force
+    # Get foot velocities
+    foot_velocities = asset.data.body_lin_vel_w[:, foot_indices, :]
+    foot_vel_z = torch.abs(foot_velocities[:, :, 2])  # Vertical velocity magnitude
     
-    # Return reward: 1.0 if both feet touching, 0.5 if one foot, 0.0 if airborne
+    # Feet are in contact if:
+    # 1. They are close to ground (height < 0.05m)
+    # 2. They have low vertical velocity (< 0.1 m/s)
+    height_contact = (foot_heights < 0.05).float()
+    velocity_contact = (foot_vel_z < 0.1).float()
+    
+    # Both conditions must be satisfied
+    feet_in_contact = height_contact * velocity_contact
+    
+    # Return average: 1.0 if both feet touching, 0.5 if one foot, 0.0 if airborne
     return feet_in_contact.mean(dim=1)
 
 
